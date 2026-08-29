@@ -3,6 +3,7 @@ const cors = require('cors');
 const path = require('path');
 const multer = require('multer');
 const { PrismaClient } = require('@prisma/client');
+const Module = require('module');
 
 const app = express();
 const prisma = new PrismaClient();
@@ -214,3 +215,5 @@ app.get('/api/users', async (req, res) => {
 
 const PORT = 5000;
 app.listen(PORT, () => console.log(` KI-Z Library API aktif di http://localhost:${PORT}`));
+
+module.exports = app;
