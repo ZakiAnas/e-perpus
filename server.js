@@ -213,6 +213,9 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
+const cors = require('cors');
+app.use(cors());
+
 const PORT = 5000;
 app.listen(PORT, () => console.log(` KI-Z Library API aktif di http://localhost:${PORT}`));
 
