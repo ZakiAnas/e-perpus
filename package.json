@@ -4,9 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-  "build": "prisma generate",
-  "start": "node server.js"
-},
+    "build": "prisma generate",
+    "start": "node server.js"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",

@@ -2,14 +2,22 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const multer = require('multer');
+const fs = require('fs');
+const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
 
 const app = express();
 const prisma = new PrismaClient();
 
+// Memastikan folder uploads tersedia agar server tidak crash saat pertama kali dijalankan
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
+}
+
 // Konfigurasi CORS sekali di paling atas
 app.use(cors({
-  origin: '*',
+  origin: 'https://e-perpus-frontend-pupips8xj-zakianas.vercel.app', // Ganti dengan URL frontend kamu
   credentials: true
 }));
 
@@ -19,7 +27,7 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 // Storage Multer
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/'),
-  filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
+  filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname.replace(/\s+/g, '-')) // Menghindari spasi pada nama file
 });
 const upload = multer({ storage });
 
@@ -37,10 +45,21 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Email sudah terdaftar!' });
     }
 
+    // Enkripsi password sebelum disimpan ke database
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
     const newUser = await prisma.user.create({
-      data: { name, email, password, role: role || 'MEMBER' }
+      data: { 
+        name, 
+        email, 
+        password: hashedPassword, 
+        role: role || 'MEMBER' 
+      }
     });
 
+    // Jangan kembalikan password di response
+    delete newUser.password;
     res.json({ status: 'success', data: newUser });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
@@ -52,10 +71,17 @@ app.post('/api/auth/login', async (req, res) => {
     const { email, password } = req.body;
     const user = await prisma.user.findUnique({ where: { email } });
 
-    if (!user || user.password !== password) {
+    if (!user) {
       return res.status(400).json({ status: 'error', message: 'Email atau password salah!' });
     }
 
+    // Komparasi password input dengan password hash di database
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ status: 'error', message: 'Email atau password salah!' });
+    }
+
+    delete user.password; // Amankan data response
     res.json({ status: 'success', data: { user } });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
@@ -88,7 +114,7 @@ app.get('/api/books', async (req, res) => {
 
     if (q) {
       whereClause.OR = [
-        { title: { contains: q } },
+        { title: { contains: q } }, // Jika pakai PostgreSQL, tambahkan mode: 'insensitive' di sini
         { author: { contains: q } }
       ];
     }
@@ -145,7 +171,10 @@ app.delete('/api/books/:id', async (req, res) => {
 app.get('/api/borrowings', async (req, res) => {
   try {
     const borrowings = await prisma.borrowing.findMany({
-      include: { user: true, book: true },
+      include: { 
+        user: { select: { id: true, name: true, email: true } }, // Jangan tarik password user di relasi
+        book: true 
+      },
       orderBy: { id: 'desc' }
     });
     res.json({ status: 'success', data: borrowings });
@@ -163,19 +192,20 @@ app.post('/api/borrow', async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Stok buku ini sedang habis!' });
     }
 
-    // Kurangi stok
-    await prisma.book.update({
-      where: { id: parseInt(bookId) },
-      data: { stock: book.stock - 1 }
-    });
-
-    const borrow = await prisma.borrowing.create({
-      data: {
-        userId: parseInt(userId),
-        bookId: parseInt(bookId),
-        status: 'BORROWED'
-      }
-    });
+    // Menggunakan transaction memastikan data sinkron (stok berkurang DAN pinjaman tercatat bersamaan)
+    const [borrow] = await prisma.$transaction([
+      prisma.borrowing.create({
+        data: {
+          userId: parseInt(userId),
+          bookId: parseInt(bookId),
+          status: 'BORROWED'
+        }
+      }),
+      prisma.book.update({
+        where: { id: parseInt(bookId) },
+        data: { stock: book.stock - 1 }
+      })
+    ]);
 
     res.json({ status: 'success', data: borrow, message: 'Buku berhasil dipinjam!' });
   } catch (err) {
@@ -189,18 +219,20 @@ app.post('/api/return', async (req, res) => {
 
     const borrow = await prisma.borrowing.findUnique({ where: { id: parseInt(borrowId) } });
     if (!borrow || borrow.status === 'RETURNED') {
-      return res.status(400).json({ status: 'error', message: 'Buku sudah dikembalikan sebelumnya!' });
+      return res.status(400).json({ status: 'error', message: 'Buku sudah dikembalikan sebelumnya atau tidak ditemukan!' });
     }
 
-    await prisma.borrowing.update({
-      where: { id: parseInt(borrowId) },
-      data: { status: 'RETURNED' }
-    });
-
-    await prisma.book.update({
-      where: { id: borrow.bookId },
-      data: { stock: { increment: 1 } }
-    });
+    // Sama seperti peminjaman, gunakan transaction agar update status & stok tidak belang
+    await prisma.$transaction([
+      prisma.borrowing.update({
+        where: { id: parseInt(borrowId) },
+        data: { status: 'RETURNED' }
+      }),
+      prisma.book.update({
+        where: { id: borrow.bookId },
+        data: { stock: { increment: 1 } }
+      })
+    ]);
 
     res.json({ status: 'success', message: 'Buku berhasil dikembalikan!' });
   } catch (err) {
@@ -210,7 +242,10 @@ app.post('/api/return', async (req, res) => {
 
 app.get('/api/users', async (req, res) => {
   try {
-    const users = await prisma.user.findMany({ orderBy: { id: 'desc' } });
+    const users = await prisma.user.findMany({ 
+      select: { id: true, name: true, email: true, role: true }, // Filter password dari response
+      orderBy: { id: 'desc' } 
+    });
     res.json({ status: 'success', data: users });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
